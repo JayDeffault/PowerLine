@@ -5,6 +5,7 @@
 #include "Components/SceneComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Tickable.h"
 #include "PowerLineSystem.generated.h"
@@ -13,6 +14,7 @@
 // District Data Manager (per area)
 // Place one APowerLineDistrictDataManager per district OR reference it manually from components.
 // ============================
+
 USTRUCT(BlueprintType)
 struct FPowerLineSagSettings
 {
@@ -63,6 +65,7 @@ struct FPowerLineSegmentsSettings
 // ============================
 // Hanging objects (rare meshes placed on wires)
 // ============================
+
 USTRUCT(BlueprintType)
 struct FPowerLineHangingSettings
 {
@@ -120,7 +123,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine")
 	FPowerLineHangingSettings Hanging;
 
-	// Get sag (cm, positive value -> downward sag). LineId can be used to diversify multiple wires between same points.
+	// Get sag (cm, positive value -> downward sag).
+	// LineId can be used to diversify multiple wires between same points.
 	UFUNCTION(BlueprintCallable, Category = "PowerLine")
 	float GetSagForLine(const FVector& StartWS, const FVector& EndWS, int32 LineId = 0) const;
 
@@ -131,7 +135,13 @@ public:
 	// Decide if a wire should have a hanging mesh and produce deterministic placement.
 	// Returns false if disabled or chance failed.
 	UFUNCTION(BlueprintCallable, Category = "PowerLine")
-	bool GetHangingForLine(const FVector& StartWS, const FVector& EndWS, int32 LineId, UStaticMesh*& OutMesh, float& OutNormalizedDistance, float& OutYawDeg) const;
+	bool GetHangingForLine(
+		const FVector& StartWS,
+		const FVector& EndWS,
+		int32 LineId,
+		UStaticMesh*& OutMesh,
+		float& OutNormalizedDistance,
+		float& OutYawDeg) const;
 
 	// Mark all wires that reference this manager dirty (useful after changing settings at runtime).
 	UFUNCTION(BlueprintCallable, Category = "PowerLine")
@@ -145,11 +155,10 @@ protected:
 #endif
 };
 
-
-
 // ============================
 // Segment
 // ============================
+
 struct FPowerLineSegment
 {
 	FVector Start;
@@ -165,6 +174,7 @@ struct FPowerLineChunkKey
 	FIntPoint Coord;
 
 	bool operator==(const FPowerLineChunkKey& O) const { return Coord == O.Coord; }
+
 	friend uint32 GetTypeHash(const FPowerLineChunkKey& K) { return GetTypeHash(K.Coord); }
 };
 
@@ -173,6 +183,7 @@ class UPowerLineSubsystem;
 // ============================
 // Render Component (one per chunk)
 // ============================
+
 UCLASS()
 class PROGRAMM_API UPowerLineRenderComponent : public UPrimitiveComponent
 {
@@ -203,6 +214,7 @@ public:
 // ============================
 // Attach lookup
 // ============================
+
 UENUM(BlueprintType)
 enum class EPowerLineAttachLookup : uint8
 {
@@ -221,6 +233,7 @@ enum class EPowerLineAttachLookup : uint8
 // Add several of these to a pole/building in Editor.
 // Each component draws one wire from itself to matching point on TargetActor.
 // ============================
+
 UCLASS(ClassGroup = (Power), meta = (BlueprintSpawnableComponent))
 class PROGRAMM_API UPowerLineComponent : public USceneComponent
 {
@@ -252,6 +265,7 @@ public:
 	// ============================
 	// District Manager (per-area settings)
 	// ============================
+
 	// Optional direct reference to district settings manager.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|District")
 	TObjectPtr<APowerLineDistrictDataManager> DistrictManager = nullptr;
@@ -308,16 +322,17 @@ private:
 	void UnbindFromTarget();
 	void HandleTargetTransformChanged(USceneComponent* InComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
 
-	// Resolve endpoint
-	bool ResolveEndPoint(FVector& OutEnd) const;
-
 public:
 	// Resolve effective district manager (manual or auto-found)
 	APowerLineDistrictDataManager* ResolveDistrictManager() const;
 
-	// Get current endpoint (resolved target attach point or manual end). Returns true if connected to TargetActor.
+	// Get current endpoint (resolved target attach point or manual end).
+	// Returns true if connected to TargetActor.
 	UFUNCTION(BlueprintCallable, Category = "PowerLine")
 	bool GetResolvedEndPointWS(FVector& OutEnd) const;
+
+	// Resolve endpoint
+	bool ResolveEndPoint(FVector& OutEnd) const;
 
 protected:
 	virtual void OnRegister() override;
@@ -329,8 +344,72 @@ protected:
 };
 
 // ============================
+// Pole Component (batched via HISM instances in subsystem)
+// Add this to pole actors to render thousands of poles with a few draw calls.
+// ============================
+
+UCLASS(ClassGroup = (Power), meta = (BlueprintSpawnableComponent))
+class PROGRAMM_API UPowerLinePoleComponent : public USceneComponent
+{
+	GENERATED_BODY()
+
+public:
+	UPowerLinePoleComponent();
+
+	// Mesh to instance. If null, component will try to find a UStaticMeshComponent on the same actor and use its mesh.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Pole")
+	TObjectPtr<UStaticMesh> PoleMesh = nullptr;
+
+	// If PoleMesh is null and a UStaticMeshComponent is found on the same actor, hide it to avoid double-render.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Pole")
+	bool bHideSourceStaticMeshComponent = true;
+
+	// Optional per-instance scale multiplier.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Pole")
+	FVector InstanceScale = FVector(1, 1, 1);
+
+	// Call if you changed mesh/settings from code.
+	UFUNCTION(BlueprintCallable, Category = "PowerLine|Pole")
+	void MarkDirty();
+
+	// Rebuild (unregister + register) - useful when swapping meshes at runtime.
+	UFUNCTION(BlueprintCallable, Category = "PowerLine|Pole")
+	void ReRegisterPole();
+
+	// Current chunk tracking (so moving actor moves between chunks w/o Tick)
+	bool bRegistered = false;
+	FPowerLineChunkKey CurrentKey;
+	bool bHasKey = false;
+
+private:
+	// Own transform changes
+	FDelegateHandle TransformChangedHandle;
+	void HandleTransformChanged(USceneComponent* InComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
+
+	UStaticMesh* ResolveMeshAndMaybeHideSource();
+	FTransform GetInstanceTransformWS() const;
+
+protected:
+	virtual void OnRegister() override;
+	virtual void OnUnregister() override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+	// Subsystem instance bookkeeping (index inside HISM).
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UHierarchicalInstancedStaticMeshComponent> CurrentHISM;
+
+	int32 InstanceIndex = INDEX_NONE;
+
+	friend class UPowerLineSubsystem;
+};
+
+// ============================
 // Chunk data
 // ============================
+
 struct FPowerLineChunk
 {
 	TArray<TWeakObjectPtr<UPowerLineComponent>> Lines;
@@ -341,6 +420,7 @@ struct FPowerLineChunk
 // ============================
 // Subsystem (autonomous)
 // ============================
+
 UCLASS()
 class PROGRAMM_API UPowerLineSubsystem : public UWorldSubsystem, public FTickableGameObject
 {
@@ -353,17 +433,17 @@ public:
 
 	// UWorldSubsystem
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override { return true; }
+
 	virtual bool DoesSupportWorldType(EWorldType::Type WorldType) const override
 	{
-		return WorldType == EWorldType::Game
-			|| WorldType == EWorldType::PIE
-			|| WorldType == EWorldType::Editor;
+		return WorldType == EWorldType::Game || WorldType == EWorldType::PIE || WorldType == EWorldType::Editor;
 	}
 
 	// Tick
 	virtual void Tick(float DeltaTime) override;
 	virtual bool IsTickable() const override { return true; }
 	virtual bool IsTickableInEditor() const override { return true; }
+
 	virtual TStatId GetStatId() const override
 	{
 		RETURN_QUICK_DECLARE_CYCLE_STAT(UPowerLineSubsystem, STATGROUP_Tickables);
@@ -374,6 +454,11 @@ public:
 	void UnregisterPowerLine(UPowerLineComponent* Line);
 	void MarkPowerLineDirty(UPowerLineComponent* Line);
 
+	// Poles batching (HISM)
+	void RegisterPole(UPowerLinePoleComponent* Pole);
+	void UnregisterPole(UPowerLinePoleComponent* Pole);
+	void MarkPoleDirty(UPowerLinePoleComponent* Pole);
+
 	// Hanging mesh helpers
 	void UpdateHangingForLine(UPowerLineComponent* Line);
 	void RemoveHangingForLine(UPowerLineComponent* Line);
@@ -381,7 +466,6 @@ public:
 private:
 	// Hidden host actor for render components (spawned once)
 	AActor* EnsureRenderHost();
-
 	FPowerLineChunkKey CalcKey(const FVector& Pos) const;
 	void EnsureRenderComponent(const FPowerLineChunkKey& Key);
 
@@ -395,6 +479,32 @@ private:
 	TMap<FPowerLineChunkKey, FPowerLineChunk> Chunks;
 	TMap<FPowerLineChunkKey, TWeakObjectPtr<UPowerLineRenderComponent>> RenderComponents;
 	TSet<FPowerLineChunkKey> DirtyChunks;
+
+	// ===== Poles batching =====
+	struct FPoleHISMData
+	{
+		TWeakObjectPtr<UHierarchicalInstancedStaticMeshComponent> HISM;
+		// Owner for each instance index (needed because RemoveInstance swaps last).
+		TArray<TWeakObjectPtr<UPowerLinePoleComponent>> Owners;
+	};
+
+	struct FPoleInstanceRef
+	{
+		FPowerLineChunkKey Key;
+		TObjectPtr<UStaticMesh> Mesh = nullptr;
+		TWeakObjectPtr<UHierarchicalInstancedStaticMeshComponent> HISM;
+		int32 Index = INDEX_NONE;
+	};
+
+	TMap<TWeakObjectPtr<UPowerLinePoleComponent>, FPoleInstanceRef> PoleRefs;
+	TMap<uint64, FPoleHISMData> PoleHISMs; // (ChunkKey+Mesh) -> HISM data
+	TSet<TWeakObjectPtr<UPowerLinePoleComponent>> DirtyPoles;
+
+	uint64 MakePoleHISMKey(const FPowerLineChunkKey& Key, const UStaticMesh* Mesh) const;
+	UHierarchicalInstancedStaticMeshComponent* GetOrCreatePoleHISM(const FPowerLineChunkKey& Key, UStaticMesh* Mesh);
+	void AddPoleInstance(UPowerLinePoleComponent* Pole, const FPowerLineChunkKey& Key, UStaticMesh* Mesh, const FTransform& XfWS);
+	void RemovePoleInstance(UPowerLinePoleComponent* Pole);
+	void UpdatePoleInstance(UPowerLinePoleComponent* Pole);
 
 	// One (optional) static mesh component per wire
 	TMap<TWeakObjectPtr<UPowerLineComponent>, TWeakObjectPtr<UStaticMeshComponent>> HangingByLine;
