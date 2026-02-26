@@ -148,10 +148,16 @@ void APowerLineDistrictDataManager::PostEditChangeProperty(FPropertyChangedEvent
 APowerLine_Pole::APowerLine_Pole()
 {
 	PrimaryActorTick.bCanEverTick = false;
-	SetActorEnableCollision(false);
 
 	USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
+
+	EditorArrow = CreateDefaultSubobject<UArrowComponent>(TEXT("EditorArrow"));
+	EditorArrow->SetupAttachment(Root);
+	EditorArrow->SetHiddenInGame(true);
+	EditorArrow->SetIsVisualizationComponent(true);
+	EditorArrow->ArrowColor = FColor::Yellow;
+	EditorArrow->ArrowSize = 1.0f;
 }
 
 void APowerLine_Pole::MarkChildWiresDirty()
@@ -614,10 +620,7 @@ AActor* UPowerLineComponent::ResolveEffectiveTargetActor() const
 
 bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 {
-	// Default behavior:
-	// - If we have a valid target -> resolve by key / fallback to actor location.
-	// - Else manual endpoint.
-
+	// Draw only when a valid target actor AND matching attach point exist.
 	if (AActor* EffectiveTarget = ResolveEffectiveTargetActor())
 	{
 		const FName MyKey = GetAttachKey();
@@ -628,12 +631,9 @@ bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 			OutEnd = TargetComp->GetComponentLocation();
 			return true;
 		}
-
-		OutEnd = EffectiveTarget->GetActorLocation();
-		return true;
 	}
 
-	OutEnd = ManualEndPointWS;
+	OutEnd = FVector::ZeroVector;
 	return false;
 }
 
@@ -686,6 +686,10 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 {
 	FVector EndWS;
 	const bool bConnected = ResolveEndPoint(EndWS);
+	if (!bConnected)
+	{
+		return;
+	}
 
 	const FVector StartWS = GetComponentLocation();
 	const FVector Delta = EndWS - StartWS;
@@ -699,7 +703,7 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 	if (DM)
 	{
 		EffectiveSag = DM->GetSagForLine(StartWS, EndWS, LineId);
-		EffectiveSegments = DM->GetSegmentsForLength(Length);
+		EffectiveSegments = FMath::Max(NumSegments, DM->GetSegmentsForLength(Length));
 	}
 
 	EffectiveSegments = FMath::Max(2, EffectiveSegments);
@@ -890,7 +894,11 @@ void UPowerLineSubsystem::UpdateHangingForLine(UPowerLineComponent* Line)
 	}
 
 	FVector EndWS;
-	Line->ResolveEndPoint(EndWS);
+	if (!Line->ResolveEndPoint(EndWS))
+	{
+		RemoveHangingForLine(Line);
+		return;
+	}
 
 	UStaticMesh* Mesh = nullptr;
 	float N = 0.5f;

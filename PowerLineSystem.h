@@ -6,6 +6,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/ArrowComponent.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Tickable.h"
 #include "PowerLineSystem.generated.h"
@@ -175,6 +176,10 @@ protected:
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
+
+private:
+	UPROPERTY(VisibleAnywhere, Category = "PowerLine")
+	TObjectPtr<UArrowComponent> EditorArrow = nullptr;
 };
 
 // ============================
@@ -202,6 +207,7 @@ struct FPowerLineChunkKey
 
 class UPowerLineSubsystem;
 class APowerLine_Pole;
+class UArrowComponent;
 
 USTRUCT(BlueprintType)
 struct FPowerLinePoleNode
