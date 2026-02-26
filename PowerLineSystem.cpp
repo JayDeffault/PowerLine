@@ -145,6 +145,40 @@ void APowerLineDistrictDataManager::PostEditChangeProperty(FPropertyChangedEvent
 }
 #endif
 
+APowerLine_Pole::APowerLine_Pole()
+{
+	PrimaryActorTick.bCanEverTick = false;
+	SetActorEnableCollision(false);
+
+	USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	SetRootComponent(Root);
+}
+
+void APowerLine_Pole::MarkChildWiresDirty()
+{
+	TArray<UPowerLineComponent*> Lines;
+	GetComponents<UPowerLineComponent>(Lines);
+
+	for (UPowerLineComponent* Line : Lines)
+	{
+		if (!Line) continue;
+		Line->RefreshTargetBinding();
+	}
+}
+
+#if WITH_EDITOR
+void APowerLine_Pole::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName PropName = PropertyChangedEvent.Property ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	if (PropName == GET_MEMBER_NAME_CHECKED(APowerLine_Pole, DefaultTargetActor))
+	{
+		MarkChildWiresDirty();
+	}
+}
+#endif
+
 // ============================
 // SceneProxy
 // ============================
@@ -486,10 +520,13 @@ void UPowerLineComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 void UPowerLineComponent::BindToTarget()
 {
 	UnbindFromTarget();
-	if (!TargetActor) return;
 	if (!GetWorld()) return;
 
-	USceneComponent* TargetRoot = TargetActor->GetRootComponent();
+	AActor* EffectiveTarget = ResolveEffectiveTargetActor();
+	if (!EffectiveTarget) return;
+	BoundTargetActor = EffectiveTarget;
+
+	USceneComponent* TargetRoot = EffectiveTarget->GetRootComponent();
 	if (!TargetRoot) return;
 
 	// subscribe to target root transform updates
@@ -501,14 +538,15 @@ void UPowerLineComponent::UnbindFromTarget()
 {
 	if (!TargetTransformChangedHandle.IsValid()) return;
 
-	if (TargetActor)
+	if (AActor* Bound = BoundTargetActor.Get())
 	{
-		if (USceneComponent* TargetRoot = TargetActor->GetRootComponent())
+		if (USceneComponent* TargetRoot = Bound->GetRootComponent())
 		{
 			TargetRoot->TransformUpdated.Remove(TargetTransformChangedHandle);
 		}
 	}
 
+	BoundTargetActor = nullptr;
 	TargetTransformChangedHandle.Reset();
 }
 
@@ -538,6 +576,12 @@ void UPowerLineComponent::MarkDirty()
 	}
 }
 
+void UPowerLineComponent::RefreshTargetBinding()
+{
+	BindToTarget();
+	MarkDirty();
+}
+
 FName UPowerLineComponent::GetAttachKey() const
 {
 	if (AttachId != NAME_None)
@@ -553,24 +597,39 @@ FName UPowerLineComponent::GetAttachKey() const
 	return GetFName();
 }
 
+AActor* UPowerLineComponent::ResolveEffectiveTargetActor() const
+{
+	if (TargetActor)
+	{
+		return TargetActor;
+	}
+
+	if (const APowerLine_Pole* PoleOwner = Cast<APowerLine_Pole>(GetOwner()))
+	{
+		return PoleOwner->DefaultTargetActor.Get();
+	}
+
+	return nullptr;
+}
+
 bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 {
 	// Default behavior:
 	// - If we have a valid target -> resolve by key / fallback to actor location.
 	// - Else manual endpoint.
 
-	if (TargetActor)
+	if (AActor* EffectiveTarget = ResolveEffectiveTargetActor())
 	{
 		const FName MyKey = GetAttachKey();
 		const FName WantedKey = (TargetAttachIdOverride != NAME_None) ? TargetAttachIdOverride : MyKey;
 
-		if (USceneComponent* TargetComp = FindAttachOnActor(TargetActor, WantedKey, TargetLookup))
+		if (USceneComponent* TargetComp = FindAttachOnActor(EffectiveTarget, WantedKey, TargetLookup))
 		{
 			OutEnd = TargetComp->GetComponentLocation();
 			return true;
 		}
 
-		OutEnd = TargetActor->GetActorLocation();
+		OutEnd = EffectiveTarget->GetActorLocation();
 		return true;
 	}
 
@@ -1292,4 +1351,142 @@ void UPowerLineSubsystem::MarkPoleDirty(UPowerLinePoleComponent* Pole)
 {
 	if (!Pole) return;
 	DirtyPoles.Add(Pole);
+}
+
+// ============================
+// Multi Pole Component
+// ============================
+
+UPowerLineMultiPoleComponent::UPowerLineMultiPoleComponent()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+	SetMobility(EComponentMobility::Movable);
+}
+
+void UPowerLineMultiPoleComponent::OnRegister()
+{
+	Super::OnRegister();
+
+	if (!TransformChangedHandle.IsValid())
+	{
+		TransformChangedHandle = TransformUpdated.AddUObject(
+			this, &UPowerLineMultiPoleComponent::HandleTransformChanged);
+	}
+
+	EnsureRuntimeComponents();
+	RebuildNow();
+}
+
+void UPowerLineMultiPoleComponent::OnUnregister()
+{
+	if (TransformChangedHandle.IsValid())
+	{
+		TransformUpdated.Remove(TransformChangedHandle);
+		TransformChangedHandle.Reset();
+	}
+
+	Super::OnUnregister();
+}
+
+#if WITH_EDITOR
+void UPowerLineMultiPoleComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	RebuildNow();
+}
+#endif
+
+void UPowerLineMultiPoleComponent::HandleTransformChanged(
+	USceneComponent*,
+	EUpdateTransformFlags,
+	ETeleportType)
+{
+	RebuildNow();
+}
+
+void UPowerLineMultiPoleComponent::EnsureRuntimeComponents()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner) return;
+
+	if (!PoleHISM)
+	{
+		PoleHISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(Owner);
+		PoleHISM->SetupAttachment(this);
+		PoleHISM->SetMobility(EComponentMobility::Movable);
+		PoleHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PoleHISM->SetGenerateOverlapEvents(false);
+		PoleHISM->RegisterComponent();
+	}
+
+	if (!WireRender)
+	{
+		WireRender = NewObject<UPowerLineRenderComponent>(Owner);
+		WireRender->SetupAttachment(this);
+		WireRender->RegisterComponent();
+	}
+}
+
+FVector UPowerLineMultiPoleComponent::GetWirePointWS(const FPowerLinePoleNode& Node) const
+{
+	const FVector Local = Node.LocalPosition + FVector(0.f, 0.f, WireAttachHeightCm);
+	return GetComponentTransform().TransformPosition(Local);
+}
+
+void UPowerLineMultiPoleComponent::RebuildNow()
+{
+	EnsureRuntimeComponents();
+	if (!PoleHISM || !WireRender) return;
+
+	PoleHISM->SetStaticMesh(PoleMesh);
+	PoleHISM->ClearInstances();
+
+	for (const FPowerLinePoleNode& Node : Nodes)
+	{
+		FTransform T(FQuat::Identity, Node.LocalPosition, PoleScale);
+		PoleHISM->AddInstance(T);
+	}
+
+	TArray<FPowerLineSegment> Segs;
+	const int32 NodeCount = Nodes.Num();
+	if (NodeCount < 2)
+	{
+		WireRender->UpdateSegments_GameThread(Segs);
+		return;
+	}
+
+	const int32 EffectiveSegments = FMath::Max(2, NumSegments);
+	const int32 PairCount = bClosedLoop ? NodeCount : (NodeCount - 1);
+	Segs.Reserve(PairCount * EffectiveSegments);
+
+	for (int32 PairIdx = 0; PairIdx < PairCount; ++PairIdx)
+	{
+		const int32 NextIdx = (PairIdx + 1) % NodeCount;
+		const FVector StartWS = GetWirePointWS(Nodes[PairIdx]);
+		const FVector EndWS = GetWirePointWS(Nodes[NextIdx]);
+
+		for (int32 i = 0; i < EffectiveSegments; ++i)
+		{
+			const float T0 = (float)i / (float)EffectiveSegments;
+			const float T1 = (float)(i + 1) / (float)EffectiveSegments;
+
+			auto PointAt = [&](float T) {
+				const FVector P = FMath::Lerp(StartWS, EndWS, T);
+				const float Center = (T - 0.5f);
+				const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
+				return P - FVector(0, 0, SagAmount * SagFactor);
+				};
+
+			FPowerLineSegment S;
+			S.Start = PointAt(T0);
+			S.End = PointAt(T1);
+			S.Color = LineColor;
+			S.Thickness = LineThickness;
+			S.DepthBias = 0.f;
+			S.bScreenSpace = true;
+			Segs.Add(S);
+		}
+	}
+
+	WireRender->UpdateSegments_GameThread(Segs);
 }
