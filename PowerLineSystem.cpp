@@ -744,7 +744,8 @@ AActor* UPowerLineSubsystem::EnsureRenderHost()
 	if (!W) return nullptr;
 
 	FActorSpawnParameters P;
-	P.Name = TEXT("PowerLine_RenderHost");
+	UObject* NameOuter = W->PersistentLevel ? static_cast<UObject*>(W->PersistentLevel) : static_cast<UObject*>(W);
+	P.Name = MakeUniqueObjectName(NameOuter, AActor::StaticClass(), TEXT("PowerLine_RenderHost"));
 	P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	P.bHideFromSceneOutliner = true;
 
