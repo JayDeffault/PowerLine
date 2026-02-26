@@ -748,7 +748,7 @@ AActor* UPowerLineSubsystem::EnsureRenderHost()
 	P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	P.bHideFromSceneOutliner = true;
 
-	AActor* Host = W->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity, P);
+	AActor* Host = W->SpawnActor<AActor>(AActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, P);
 	if (!Host) return nullptr;
 
 	Host->SetActorHiddenInGame(true);
