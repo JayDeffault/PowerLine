@@ -577,7 +577,7 @@ void UPowerLineComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 
 	const FName PropName = PropertyChangedEvent.Property ? PropertyChangedEvent.Property->GetFName() : NAME_None;
 
-	// If target changed in editor, rebind so movement updates will work
+	// If target/attach mapping changed in editor, rebind movement delegate.
 	if (PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, TargetActor) ||
 		PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, TargetLookup) ||
 		PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, AttachId) ||
@@ -585,8 +585,11 @@ void UPowerLineComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 		PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, ManualEndPointWS))
 	{
 		BindToTarget();
-		MarkDirty();
 	}
+
+	// Any editable property can affect rendering (segments/sag/color/thickness/district),
+	// so always request rebuild in editor.
+	MarkDirty();
 }
 #endif
 
