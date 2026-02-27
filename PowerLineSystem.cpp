@@ -789,8 +789,10 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 	if (DM)
 	{
 		EffectiveSag = DM->GetSagForLine(StartWS, EndWS, LineId);
-		// District manager segment policy is authoritative when manager is resolved.
-		EffectiveSegments = FMath::Max(2, DM->GetSegmentsForLength(Length));
+		// Use both sources so per-wire NumSegments can always increase detail,
+		// while district auto/fixed policy still affects baseline segmentation.
+		const int32 DistrictSegments = DM->GetSegmentsForLength(Length);
+		EffectiveSegments = FMath::Max(2, FMath::Max(NumSegments, DistrictSegments));
 	}
 
 	auto PointAt = [&](float T) {
