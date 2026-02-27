@@ -195,7 +195,7 @@ void APowerLineDistrictDataManager::MarkAllDistrictWiresDirty()
 
 		if (bDirect || bAutoSameId)
 		{
-			if (!bUseArea || AffectsWorldLocation(Line->GetComponentLocation()))
+			if (bDirect || !bUseArea || AffectsWorldLocation(Line->GetComponentLocation()))
 			{
 				Line->MarkDirty();
 			}
@@ -718,12 +718,7 @@ APowerLineDistrictDataManager* UPowerLineComponent::ResolveDistrictManager() con
 
 	if (DistrictManager)
 	{
-		APowerLineDistrictDataManager* Direct = DistrictManager.Get();
-		if (Direct && Direct->AffectsWorldLocation(MyLocation))
-		{
-			return Direct;
-		}
-		return nullptr;
+		return DistrictManager.Get();
 	}
 
 	if (!bAutoFindDistrictDataManager)

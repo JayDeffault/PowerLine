@@ -126,7 +126,7 @@ public:
 
 	// If enabled, this manager affects only wires/components inside the selected area.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Area")
-	bool bUseArea = true;
+	bool bUseArea = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Area", meta = (EditCondition = "bUseArea"))
 	EPowerLineDistrictAreaShape AreaShape = EPowerLineDistrictAreaShape::Sphere;
