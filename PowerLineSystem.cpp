@@ -690,7 +690,7 @@ AActor* UPowerLineComponent::ResolveEffectiveTargetActor() const
 
 bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 {
-	// Draw only when a valid target actor AND matching attach point exist.
+	// 1) If we have a target actor, draw only when a matching attach exists.
 	if (AActor* EffectiveTarget = ResolveEffectiveTargetActor())
 	{
 		const FName MyKey = GetAttachKey();
@@ -701,10 +701,14 @@ bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 			OutEnd = TargetComp->GetComponentLocation();
 			return true;
 		}
+
+		OutEnd = FVector::ZeroVector;
+		return false;
 	}
 
-	OutEnd = FVector::ZeroVector;
-	return false;
+	// 2) No target actor: use manual endpoint (legacy/manual authoring mode).
+	OutEnd = ManualEndPointWS;
+	return true;
 }
 
 bool UPowerLineComponent::GetResolvedEndPointWS(FVector& OutEnd) const
@@ -779,10 +783,8 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 	if (DM)
 	{
 		EffectiveSag = DM->GetSagForLine(StartWS, EndWS, LineId);
-		if (bUseDistrictSegments || DM->Segments.bAutoSegments)
-		{
-			EffectiveSegments = FMath::Max(2, DM->GetSegmentsForLength(Length));
-		}
+		// District manager segment policy is authoritative when manager is resolved.
+		EffectiveSegments = FMath::Max(2, DM->GetSegmentsForLength(Length));
 	}
 
 	// Build catenary-ish sag by quadratic curve
