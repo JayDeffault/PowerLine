@@ -706,9 +706,15 @@ bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 		return false;
 	}
 
-	// 2) No target actor: use manual endpoint (legacy/manual authoring mode).
-	OutEnd = ManualEndPointWS;
-	return true;
+	// 2) No target actor: use manual endpoint only when it is explicitly set.
+	if (!ManualEndPointWS.IsNearlyZero())
+	{
+		OutEnd = ManualEndPointWS;
+		return true;
+	}
+
+	OutEnd = FVector::ZeroVector;
+	return false;
 }
 
 bool UPowerLineComponent::GetResolvedEndPointWS(FVector& OutEnd) const
@@ -787,23 +793,67 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 		EffectiveSegments = FMath::Max(2, DM->GetSegmentsForLength(Length));
 	}
 
-	// Build catenary-ish sag by quadratic curve
+	auto PointAt = [&](float T) {
+		const FVector P = FMath::Lerp(StartWS, EndWS, T);
+		const float Center = (T - 0.5f);
+		const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
+		return P - FVector(0, 0, EffectiveSag * SagFactor);
+		};
+
+	// Build equal-length segments along the sagged curve (arc-length parameterization).
+	const int32 SampleCount = FMath::Clamp(EffectiveSegments * 8, 32, 512);
+	TArray<FVector> Samples;
+	Samples.Reserve(SampleCount + 1);
+
+	TArray<float> CumLen;
+	CumLen.Reserve(SampleCount + 1);
+
+	float TotalLen = 0.f;
+	FVector Prev = PointAt(0.f);
+	Samples.Add(Prev);
+	CumLen.Add(0.f);
+
+	for (int32 i = 1; i <= SampleCount; ++i)
+	{
+		const float T = (float)i / (float)SampleCount;
+		const FVector Cur = PointAt(T);
+		TotalLen += FVector::Dist(Prev, Cur);
+		Samples.Add(Cur);
+		CumLen.Add(TotalLen);
+		Prev = Cur;
+	}
+
+	if (TotalLen <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	auto EvalAtDistance = [&](float TargetLen) {
+		const float ClampedTarget = FMath::Clamp(TargetLen, 0.f, TotalLen);
+		for (int32 Idx = 1; Idx < CumLen.Num(); ++Idx)
+		{
+			if (CumLen[Idx] < ClampedTarget)
+			{
+				continue;
+			}
+
+			const float L0 = CumLen[Idx - 1];
+			const float L1 = CumLen[Idx];
+			const float A = (L1 > L0) ? ((ClampedTarget - L0) / (L1 - L0)) : 0.f;
+			return FMath::Lerp(Samples[Idx - 1], Samples[Idx], A);
+		}
+
+		return Samples.Last();
+		};
+
 	for (int32 i = 0; i < EffectiveSegments; ++i)
 	{
-		const float T0 = (float)i / (float)EffectiveSegments;
-		const float T1 = (float)(i + 1) / (float)EffectiveSegments;
-
-		auto PointAt = [&](float T) {
-			const FVector P = FMath::Lerp(StartWS, EndWS, T);
-			// Sag is max at middle (T=0.5), 0 at ends
-			const float Center = (T - 0.5f);
-			const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
-			return P - FVector(0, 0, EffectiveSag * SagFactor);
-			};
+		const float L0 = (TotalLen * (float)i) / (float)EffectiveSegments;
+		const float L1 = (TotalLen * (float)(i + 1)) / (float)EffectiveSegments;
 
 		FPowerLineSegment S;
-		S.Start = PointAt(T0);
-		S.End = PointAt(T1);
+		S.Start = EvalAtDistance(L0);
+		S.End = EvalAtDistance(L1);
 		S.Color = LineColor;
 		S.Thickness = LineThickness;
 		S.DepthBias = 0.f;
