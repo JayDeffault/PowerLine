@@ -779,7 +779,7 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 	if (DM)
 	{
 		EffectiveSag = DM->GetSagForLine(StartWS, EndWS, LineId);
-		if (bUseDistrictSegments)
+		if (bUseDistrictSegments || DM->Segments.bAutoSegments)
 		{
 			EffectiveSegments = FMath::Max(2, DM->GetSegmentsForLength(Length));
 		}

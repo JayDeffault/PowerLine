@@ -369,10 +369,10 @@ public:
 	UPROPERTY(EditAnywhere, Category = "PowerLine|Shape", meta = (ClampMin = "2"))
 	int32 NumSegments = 8;
 
-	// If true, segment count is driven by DistrictManager settings.
-	// If false, this component NumSegments is used (recommended for manual control).
+	// If true, segment count is driven by DistrictManager Segments settings (Auto Segments).
+	// If false, this component NumSegments is used.
 	UPROPERTY(EditAnywhere, Category = "PowerLine|Shape")
-	bool bUseDistrictSegments = false;
+	bool bUseDistrictSegments = true;
 
 	UPROPERTY(EditAnywhere, Category = "PowerLine|Render", meta = (ClampMin = "0.1"))
 	float LineThickness = 2.f;
