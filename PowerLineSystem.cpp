@@ -1607,21 +1607,66 @@ void UPowerLineMultiPoleComponent::RebuildNow()
 		const FVector StartWS = GetWirePointWS(Nodes[PairIdx]);
 		const FVector EndWS = GetWirePointWS(Nodes[NextIdx]);
 
+		auto PointAt = [&](float T) {
+			const FVector P = FMath::Lerp(StartWS, EndWS, T);
+			const float Center = (T - 0.5f);
+			const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
+			return P - FVector(0, 0, SagAmount * SagFactor);
+			};
+
+		const int32 SampleCount = FMath::Clamp(EffectiveSegments * 8, 32, 512);
+		TArray<FVector> Samples;
+		Samples.Reserve(SampleCount + 1);
+
+		TArray<float> CumLen;
+		CumLen.Reserve(SampleCount + 1);
+
+		float TotalLen = 0.f;
+		FVector Prev = PointAt(0.f);
+		Samples.Add(Prev);
+		CumLen.Add(0.f);
+
+		for (int32 i = 1; i <= SampleCount; ++i)
+		{
+			const float T = (float)i / (float)SampleCount;
+			const FVector Cur = PointAt(T);
+			TotalLen += FVector::Dist(Prev, Cur);
+			Samples.Add(Cur);
+			CumLen.Add(TotalLen);
+			Prev = Cur;
+		}
+
+		if (TotalLen <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		auto EvalAtDistance = [&](float TargetLen) {
+			const float ClampedTarget = FMath::Clamp(TargetLen, 0.f, TotalLen);
+			for (int32 Idx = 1; Idx < CumLen.Num(); ++Idx)
+			{
+				if (CumLen[Idx] < ClampedTarget)
+				{
+					continue;
+				}
+
+				const float L0 = CumLen[Idx - 1];
+				const float L1 = CumLen[Idx];
+				const float A = (L1 > L0) ? ((ClampedTarget - L0) / (L1 - L0)) : 0.f;
+				return FMath::Lerp(Samples[Idx - 1], Samples[Idx], A);
+			}
+
+			return Samples.Last();
+			};
+
 		for (int32 i = 0; i < EffectiveSegments; ++i)
 		{
-			const float T0 = (float)i / (float)EffectiveSegments;
-			const float T1 = (float)(i + 1) / (float)EffectiveSegments;
-
-			auto PointAt = [&](float T) {
-				const FVector P = FMath::Lerp(StartWS, EndWS, T);
-				const float Center = (T - 0.5f);
-				const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
-				return P - FVector(0, 0, SagAmount * SagFactor);
-				};
+			const float L0 = (TotalLen * (float)i) / (float)EffectiveSegments;
+			const float L1 = (TotalLen * (float)(i + 1)) / (float)EffectiveSegments;
 
 			FPowerLineSegment S;
-			S.Start = PointAt(T0);
-			S.End = PointAt(T1);
+			S.Start = EvalAtDistance(L0);
+			S.End = EvalAtDistance(L1);
 			S.Color = LineColor;
 			S.Thickness = LineThickness;
 			S.DepthBias = 0.f;
