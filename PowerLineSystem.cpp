@@ -797,8 +797,7 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 
 	auto PointAt = [&](float T) {
 		const FVector P = FMath::Lerp(StartWS, EndWS, T);
-		const float Center = (T - 0.5f);
-		const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
+		const float SagFactor = FMath::Clamp(4.f * T * (1.f - T), 0.f, 1.f);
 		return P - FVector(0, 0, EffectiveSag * SagFactor);
 		};
 
@@ -1065,8 +1064,7 @@ void UPowerLineSubsystem::UpdateHangingForLine(UPowerLineComponent* Line)
 	const FVector StartWS = Line->GetComponentLocation();
 	const FVector Pos = FMath::Lerp(StartWS, EndWS, N);
 	const float EffectiveSag = DM->GetSagForLine(StartWS, EndWS, Line->LineId);
-	const float Center = (N - 0.5f);
-	const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
+	const float SagFactor = FMath::Clamp(4.f * N * (1.f - N), 0.f, 1.f);
 	const FVector SaggedPos = Pos - FVector(0, 0, EffectiveSag * SagFactor);
 
 	// Rotate around tangent
@@ -1611,8 +1609,7 @@ void UPowerLineMultiPoleComponent::RebuildNow()
 
 		auto PointAt = [&](float T) {
 			const FVector P = FMath::Lerp(StartWS, EndWS, T);
-			const float Center = (T - 0.5f);
-			const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
+			const float SagFactor = FMath::Clamp(4.f * T * (1.f - T), 0.f, 1.f);
 			return P - FVector(0, 0, SagAmount * SagFactor);
 			};
 
