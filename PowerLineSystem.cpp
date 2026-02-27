@@ -774,15 +774,16 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 	APowerLineDistrictDataManager* DM = ResolveDistrictManager();
 
 	float EffectiveSag = SagAmount;
-	int32 EffectiveSegments = NumSegments;
+	int32 EffectiveSegments = FMath::Max(2, NumSegments);
 
 	if (DM)
 	{
 		EffectiveSag = DM->GetSagForLine(StartWS, EndWS, LineId);
-		EffectiveSegments = FMath::Max(NumSegments, DM->GetSegmentsForLength(Length));
+		if (bUseDistrictSegments)
+		{
+			EffectiveSegments = FMath::Max(2, DM->GetSegmentsForLength(Length));
+		}
 	}
-
-	EffectiveSegments = FMath::Max(2, EffectiveSegments);
 
 	// Build catenary-ish sag by quadratic curve
 	for (int32 i = 0; i < EffectiveSegments; ++i)
