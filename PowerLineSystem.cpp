@@ -15,6 +15,28 @@ APowerLineDistrictDataManager::APowerLineDistrictDataManager()
 	PrimaryActorTick.bCanEverTick = false;
 	SetActorEnableCollision(false);
 	SetCanBeDamaged(false);
+
+	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("DistrictRoot"));
+	SetRootComponent(SceneRoot);
+
+	EditorBillboard = CreateDefaultSubobject<UBillboardComponent>(TEXT("DistrictBillboard"));
+	EditorBillboard->SetupAttachment(SceneRoot);
+	EditorBillboard->SetHiddenInGame(true);
+	EditorBillboard->SetIsVisualizationComponent(true);
+
+	AreaSphereComponent = CreateDefaultSubobject<USphereComponent>(TEXT("AreaSphere"));
+	AreaSphereComponent->SetupAttachment(SceneRoot);
+	AreaSphereComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	AreaSphereComponent->SetGenerateOverlapEvents(false);
+	AreaSphereComponent->SetHiddenInGame(true);
+
+	AreaBoxComponent = CreateDefaultSubobject<UBoxComponent>(TEXT("AreaBox"));
+	AreaBoxComponent->SetupAttachment(SceneRoot);
+	AreaBoxComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	AreaBoxComponent->SetGenerateOverlapEvents(false);
+	AreaBoxComponent->SetHiddenInGame(true);
+
+	RefreshAreaVisualization();
 }
 
 uint32 APowerLineDistrictDataManager::HashLine(const FVector& A, const FVector& B, int32 LineId)
@@ -111,6 +133,47 @@ bool APowerLineDistrictDataManager::GetHangingForLine(
 	return true;
 }
 
+bool APowerLineDistrictDataManager::AffectsWorldLocation(const FVector& LocationWS) const
+{
+	if (!bUseArea)
+	{
+		return true;
+	}
+
+	const FVector Local = GetActorTransform().InverseTransformPosition(LocationWS);
+	if (AreaShape == EPowerLineDistrictAreaShape::Sphere)
+	{
+		const float Radius = FMath::Max(1.f, SphereRadiusCm);
+		return Local.SizeSquared() <= FMath::Square(Radius);
+	}
+
+	const FVector Extent = FVector(
+		FMath::Max(1.f, BoxExtentCm.X),
+		FMath::Max(1.f, BoxExtentCm.Y),
+		FMath::Max(1.f, BoxExtentCm.Z));
+	return FMath::Abs(Local.X) <= Extent.X
+		&& FMath::Abs(Local.Y) <= Extent.Y
+		&& FMath::Abs(Local.Z) <= Extent.Z;
+}
+
+void APowerLineDistrictDataManager::RefreshAreaVisualization()
+{
+	if (AreaSphereComponent)
+	{
+		AreaSphereComponent->SetSphereRadius(FMath::Max(1.f, SphereRadiusCm));
+		AreaSphereComponent->SetVisibility(bUseArea && AreaShape == EPowerLineDistrictAreaShape::Sphere);
+	}
+
+	if (AreaBoxComponent)
+	{
+		AreaBoxComponent->SetBoxExtent(FVector(
+			FMath::Max(1.f, BoxExtentCm.X),
+			FMath::Max(1.f, BoxExtentCm.Y),
+			FMath::Max(1.f, BoxExtentCm.Z)));
+		AreaBoxComponent->SetVisibility(bUseArea && AreaShape == EPowerLineDistrictAreaShape::Box);
+	}
+}
+
 void APowerLineDistrictDataManager::MarkAllDistrictWiresDirty()
 {
 	UWorld* W = GetWorld();
@@ -132,7 +195,10 @@ void APowerLineDistrictDataManager::MarkAllDistrictWiresDirty()
 
 		if (bDirect || bAutoSameId)
 		{
-			Line->MarkDirty();
+			if (bDirect || !bUseArea || AffectsWorldLocation(Line->GetComponentLocation()))
+			{
+				Line->MarkDirty();
+			}
 		}
 	}
 }
@@ -141,7 +207,48 @@ void APowerLineDistrictDataManager::MarkAllDistrictWiresDirty()
 void APowerLineDistrictDataManager::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
+	RefreshAreaVisualization();
 	MarkAllDistrictWiresDirty();
+}
+#endif
+
+APowerLine_Pole::APowerLine_Pole()
+{
+	PrimaryActorTick.bCanEverTick = false;
+
+	USceneComponent* Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	SetRootComponent(Root);
+
+	EditorArrow = CreateDefaultSubobject<UArrowComponent>(TEXT("EditorArrow"));
+	EditorArrow->SetupAttachment(Root);
+	EditorArrow->SetHiddenInGame(true);
+	EditorArrow->SetIsVisualizationComponent(true);
+	EditorArrow->ArrowColor = FColor::Yellow;
+	EditorArrow->ArrowSize = 1.0f;
+}
+
+void APowerLine_Pole::MarkChildWiresDirty()
+{
+	TArray<UPowerLineComponent*> Lines;
+	GetComponents<UPowerLineComponent>(Lines);
+
+	for (UPowerLineComponent* Line : Lines)
+	{
+		if (!Line) continue;
+		Line->RefreshTargetBinding();
+	}
+}
+
+#if WITH_EDITOR
+void APowerLine_Pole::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	const FName PropName = PropertyChangedEvent.Property ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+	if (PropName == GET_MEMBER_NAME_CHECKED(APowerLine_Pole, DefaultTargetActor))
+	{
+		MarkChildWiresDirty();
+	}
 }
 #endif
 
@@ -470,7 +577,7 @@ void UPowerLineComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 
 	const FName PropName = PropertyChangedEvent.Property ? PropertyChangedEvent.Property->GetFName() : NAME_None;
 
-	// If target changed in editor, rebind so movement updates will work
+	// If target/attach mapping changed in editor, rebind movement delegate.
 	if (PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, TargetActor) ||
 		PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, TargetLookup) ||
 		PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, AttachId) ||
@@ -478,18 +585,24 @@ void UPowerLineComponent::PostEditChangeProperty(FPropertyChangedEvent& Property
 		PropName == GET_MEMBER_NAME_CHECKED(UPowerLineComponent, ManualEndPointWS))
 	{
 		BindToTarget();
-		MarkDirty();
 	}
+
+	// Any editable property can affect rendering (segments/sag/color/thickness/district),
+	// so always request rebuild in editor.
+	MarkDirty();
 }
 #endif
 
 void UPowerLineComponent::BindToTarget()
 {
 	UnbindFromTarget();
-	if (!TargetActor) return;
 	if (!GetWorld()) return;
 
-	USceneComponent* TargetRoot = TargetActor->GetRootComponent();
+	AActor* EffectiveTarget = ResolveEffectiveTargetActor();
+	if (!EffectiveTarget) return;
+	BoundTargetActor = EffectiveTarget;
+
+	USceneComponent* TargetRoot = EffectiveTarget->GetRootComponent();
 	if (!TargetRoot) return;
 
 	// subscribe to target root transform updates
@@ -501,14 +614,15 @@ void UPowerLineComponent::UnbindFromTarget()
 {
 	if (!TargetTransformChangedHandle.IsValid()) return;
 
-	if (TargetActor)
+	if (AActor* Bound = BoundTargetActor.Get())
 	{
-		if (USceneComponent* TargetRoot = TargetActor->GetRootComponent())
+		if (USceneComponent* TargetRoot = Bound->GetRootComponent())
 		{
 			TargetRoot->TransformUpdated.Remove(TargetTransformChangedHandle);
 		}
 	}
 
+	BoundTargetActor = nullptr;
 	TargetTransformChangedHandle.Reset();
 }
 
@@ -538,6 +652,12 @@ void UPowerLineComponent::MarkDirty()
 	}
 }
 
+void UPowerLineComponent::RefreshTargetBinding()
+{
+	BindToTarget();
+	MarkDirty();
+}
+
 FName UPowerLineComponent::GetAttachKey() const
 {
 	if (AttachId != NAME_None)
@@ -553,28 +673,47 @@ FName UPowerLineComponent::GetAttachKey() const
 	return GetFName();
 }
 
+AActor* UPowerLineComponent::ResolveEffectiveTargetActor() const
+{
+	if (TargetActor)
+	{
+		return TargetActor;
+	}
+
+	if (const APowerLine_Pole* PoleOwner = Cast<APowerLine_Pole>(GetOwner()))
+	{
+		return PoleOwner->DefaultTargetActor.Get();
+	}
+
+	return nullptr;
+}
+
 bool UPowerLineComponent::ResolveEndPoint(FVector& OutEnd) const
 {
-	// Default behavior:
-	// - If we have a valid target -> resolve by key / fallback to actor location.
-	// - Else manual endpoint.
-
-	if (TargetActor)
+	// 1) If we have a target actor, draw only when a matching attach exists.
+	if (AActor* EffectiveTarget = ResolveEffectiveTargetActor())
 	{
 		const FName MyKey = GetAttachKey();
 		const FName WantedKey = (TargetAttachIdOverride != NAME_None) ? TargetAttachIdOverride : MyKey;
 
-		if (USceneComponent* TargetComp = FindAttachOnActor(TargetActor, WantedKey, TargetLookup))
+		if (USceneComponent* TargetComp = FindAttachOnActor(EffectiveTarget, WantedKey, TargetLookup))
 		{
 			OutEnd = TargetComp->GetComponentLocation();
 			return true;
 		}
 
-		OutEnd = TargetActor->GetActorLocation();
+		OutEnd = FVector::ZeroVector;
+		return false;
+	}
+
+	// 2) No target actor: use manual endpoint only when it is explicitly set.
+	if (!ManualEndPointWS.IsNearlyZero())
+	{
+		OutEnd = ManualEndPointWS;
 		return true;
 	}
 
-	OutEnd = ManualEndPointWS;
+	OutEnd = FVector::ZeroVector;
 	return false;
 }
 
@@ -585,6 +724,8 @@ bool UPowerLineComponent::GetResolvedEndPointWS(FVector& OutEnd) const
 
 APowerLineDistrictDataManager* UPowerLineComponent::ResolveDistrictManager() const
 {
+	const FVector MyLocation = GetComponentLocation();
+
 	if (DistrictManager)
 	{
 		return DistrictManager.Get();
@@ -599,25 +740,29 @@ APowerLineDistrictDataManager* UPowerLineComponent::ResolveDistrictManager() con
 	if (!W) return nullptr;
 
 	APowerLineDistrictDataManager* Best = nullptr;
+	float BestDistSq = TNumericLimits<float>::Max();
 
 	for (TActorIterator<APowerLineDistrictDataManager> It(W); It; ++It)
 	{
 		APowerLineDistrictDataManager* M = *It;
 		if (!M) continue;
 
-		// If user set DistrictId -> prefer matches
-		if (DistrictId != NAME_None)
+		if (DistrictId != NAME_None && M->DistrictId != DistrictId)
 		{
-			if (M->DistrictId == DistrictId)
-			{
-				return M; // exact match wins
-			}
 			continue;
 		}
 
-		// No district id: if only one exists -> use it
-		if (!Best) Best = M;
-		else return Best; // more than one -> ambiguous, keep first
+		if (!M->AffectsWorldLocation(MyLocation))
+		{
+			continue;
+		}
+
+		const float DistSq = FVector::DistSquared(MyLocation, M->GetActorLocation());
+		if (DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			Best = M;
+		}
 	}
 
 	return Best;
@@ -627,6 +772,10 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 {
 	FVector EndWS;
 	const bool bConnected = ResolveEndPoint(EndWS);
+	if (!bConnected)
+	{
+		return;
+	}
 
 	const FVector StartWS = GetComponentLocation();
 	const FVector Delta = EndWS - StartWS;
@@ -635,33 +784,77 @@ void UPowerLineComponent::BuildSegments(TArray<FPowerLineSegment>& Out) const
 	APowerLineDistrictDataManager* DM = ResolveDistrictManager();
 
 	float EffectiveSag = SagAmount;
-	int32 EffectiveSegments = NumSegments;
+	int32 EffectiveSegments = FMath::Max(2, NumSegments);
 
 	if (DM)
 	{
 		EffectiveSag = DM->GetSagForLine(StartWS, EndWS, LineId);
-		EffectiveSegments = DM->GetSegmentsForLength(Length);
+		// Use both sources so per-wire NumSegments can always increase detail,
+		// while district auto/fixed policy still affects baseline segmentation.
+		const int32 DistrictSegments = DM->GetSegmentsForLength(Length);
+		EffectiveSegments = FMath::Max(2, FMath::Max(NumSegments, DistrictSegments));
 	}
 
-	EffectiveSegments = FMath::Max(2, EffectiveSegments);
+	auto PointAt = [&](float T) {
+		const FVector P = FMath::Lerp(StartWS, EndWS, T);
+		const float SagFactor = FMath::Clamp(4.f * T * (1.f - T), 0.f, 1.f);
+		return P - FVector(0, 0, EffectiveSag * SagFactor);
+		};
 
-	// Build catenary-ish sag by quadratic curve
+	// Build equal-length segments along the sagged curve (arc-length parameterization).
+	const int32 SampleCount = FMath::Clamp(EffectiveSegments * 8, 32, 512);
+	TArray<FVector> Samples;
+	Samples.Reserve(SampleCount + 1);
+
+	TArray<float> CumLen;
+	CumLen.Reserve(SampleCount + 1);
+
+	float TotalLen = 0.f;
+	FVector Prev = PointAt(0.f);
+	Samples.Add(Prev);
+	CumLen.Add(0.f);
+
+	for (int32 i = 1; i <= SampleCount; ++i)
+	{
+		const float T = (float)i / (float)SampleCount;
+		const FVector Cur = PointAt(T);
+		TotalLen += FVector::Dist(Prev, Cur);
+		Samples.Add(Cur);
+		CumLen.Add(TotalLen);
+		Prev = Cur;
+	}
+
+	if (TotalLen <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+
+	auto EvalAtDistance = [&](float TargetLen) {
+		const float ClampedTarget = FMath::Clamp(TargetLen, 0.f, TotalLen);
+		for (int32 Idx = 1; Idx < CumLen.Num(); ++Idx)
+		{
+			if (CumLen[Idx] < ClampedTarget)
+			{
+				continue;
+			}
+
+			const float L0 = CumLen[Idx - 1];
+			const float L1 = CumLen[Idx];
+			const float A = (L1 > L0) ? ((ClampedTarget - L0) / (L1 - L0)) : 0.f;
+			return FMath::Lerp(Samples[Idx - 1], Samples[Idx], A);
+		}
+
+		return Samples.Last();
+		};
+
 	for (int32 i = 0; i < EffectiveSegments; ++i)
 	{
-		const float T0 = (float)i / (float)EffectiveSegments;
-		const float T1 = (float)(i + 1) / (float)EffectiveSegments;
-
-		auto PointAt = [&](float T) {
-			const FVector P = FMath::Lerp(StartWS, EndWS, T);
-			// Sag is max at middle (T=0.5), 0 at ends
-			const float Center = (T - 0.5f);
-			const float SagFactor = 1.f - FMath::Clamp(FMath::Abs(Center) * 2.f, 0.f, 1.f);
-			return P - FVector(0, 0, EffectiveSag * SagFactor);
-			};
+		const float L0 = (TotalLen * (float)i) / (float)EffectiveSegments;
+		const float L1 = (TotalLen * (float)(i + 1)) / (float)EffectiveSegments;
 
 		FPowerLineSegment S;
-		S.Start = PointAt(T0);
-		S.End = PointAt(T1);
+		S.Start = EvalAtDistance(L0);
+		S.End = EvalAtDistance(L1);
 		S.Color = LineColor;
 		S.Thickness = LineThickness;
 		S.DepthBias = 0.f;
@@ -685,11 +878,12 @@ AActor* UPowerLineSubsystem::EnsureRenderHost()
 	if (!W) return nullptr;
 
 	FActorSpawnParameters P;
-	P.Name = TEXT("PowerLine_RenderHost");
+	UObject* NameOuter = W->PersistentLevel ? static_cast<UObject*>(W->PersistentLevel) : static_cast<UObject*>(W);
+	P.Name = MakeUniqueObjectName(NameOuter, AActor::StaticClass(), TEXT("PowerLine_RenderHost"));
 	P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	P.bHideFromSceneOutliner = true;
 
-	AActor* Host = W->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity, P);
+	AActor* Host = W->SpawnActor<AActor>(AActor::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, P);
 	if (!Host) return nullptr;
 
 	Host->SetActorHiddenInGame(true);
@@ -830,7 +1024,11 @@ void UPowerLineSubsystem::UpdateHangingForLine(UPowerLineComponent* Line)
 	}
 
 	FVector EndWS;
-	Line->ResolveEndPoint(EndWS);
+	if (!Line->ResolveEndPoint(EndWS))
+	{
+		RemoveHangingForLine(Line);
+		return;
+	}
 
 	UStaticMesh* Mesh = nullptr;
 	float N = 0.5f;
@@ -862,16 +1060,19 @@ void UPowerLineSubsystem::UpdateHangingForLine(UPowerLineComponent* Line)
 	Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Comp->SetGenerateOverlapEvents(false);
 
-	// Place along wire
+	// Place along wire, accounting for sag at sample point N.
 	const FVector StartWS = Line->GetComponentLocation();
 	const FVector Pos = FMath::Lerp(StartWS, EndWS, N);
+	const float EffectiveSag = DM->GetSagForLine(StartWS, EndWS, Line->LineId);
+	const float SagFactor = FMath::Clamp(4.f * N * (1.f - N), 0.f, 1.f);
+	const FVector SaggedPos = Pos - FVector(0, 0, EffectiveSag * SagFactor);
 
 	// Rotate around tangent
 	const FVector Tangent = (EndWS - StartWS).GetSafeNormal();
 	const FRotator Rot = FRotationMatrix::MakeFromX(Tangent).Rotator() + FRotator(0.f, YawDeg, 0.f);
 
 	FTransform T;
-	T.SetLocation(Pos - FVector(0, 0, DM->Hanging.DownOffsetCm));
+	T.SetLocation(SaggedPos - FVector(0, 0, DM->Hanging.DownOffsetCm));
 	T.SetRotation(Rot.Quaternion());
 	T.SetScale3D(FVector(1));
 
@@ -1292,4 +1493,186 @@ void UPowerLineSubsystem::MarkPoleDirty(UPowerLinePoleComponent* Pole)
 {
 	if (!Pole) return;
 	DirtyPoles.Add(Pole);
+}
+
+// ============================
+// Multi Pole Component
+// ============================
+
+UPowerLineMultiPoleComponent::UPowerLineMultiPoleComponent()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+	SetMobility(EComponentMobility::Movable);
+}
+
+void UPowerLineMultiPoleComponent::OnRegister()
+{
+	Super::OnRegister();
+
+	if (!TransformChangedHandle.IsValid())
+	{
+		TransformChangedHandle = TransformUpdated.AddUObject(
+			this, &UPowerLineMultiPoleComponent::HandleTransformChanged);
+	}
+
+	EnsureRuntimeComponents();
+	RebuildNow();
+}
+
+void UPowerLineMultiPoleComponent::OnUnregister()
+{
+	if (TransformChangedHandle.IsValid())
+	{
+		TransformUpdated.Remove(TransformChangedHandle);
+		TransformChangedHandle.Reset();
+	}
+
+	Super::OnUnregister();
+}
+
+#if WITH_EDITOR
+void UPowerLineMultiPoleComponent::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	RebuildNow();
+}
+#endif
+
+void UPowerLineMultiPoleComponent::HandleTransformChanged(
+	USceneComponent*,
+	EUpdateTransformFlags,
+	ETeleportType)
+{
+	RebuildNow();
+}
+
+void UPowerLineMultiPoleComponent::EnsureRuntimeComponents()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner) return;
+
+	if (!PoleHISM)
+	{
+		PoleHISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(Owner);
+		PoleHISM->SetupAttachment(this);
+		PoleHISM->SetMobility(EComponentMobility::Movable);
+		PoleHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PoleHISM->SetGenerateOverlapEvents(false);
+		PoleHISM->RegisterComponent();
+	}
+
+	if (!WireRender)
+	{
+		WireRender = NewObject<UPowerLineRenderComponent>(Owner);
+		WireRender->SetupAttachment(this);
+		WireRender->RegisterComponent();
+	}
+}
+
+FVector UPowerLineMultiPoleComponent::GetWirePointWS(const FPowerLinePoleNode& Node) const
+{
+	const FVector Local = Node.LocalPosition + FVector(0.f, 0.f, WireAttachHeightCm);
+	return GetComponentTransform().TransformPosition(Local);
+}
+
+void UPowerLineMultiPoleComponent::RebuildNow()
+{
+	EnsureRuntimeComponents();
+	if (!PoleHISM || !WireRender) return;
+
+	PoleHISM->SetStaticMesh(PoleMesh);
+	PoleHISM->ClearInstances();
+
+	for (const FPowerLinePoleNode& Node : Nodes)
+	{
+		FTransform T(FQuat::Identity, Node.LocalPosition, PoleScale);
+		PoleHISM->AddInstance(T);
+	}
+
+	TArray<FPowerLineSegment> Segs;
+	const int32 NodeCount = Nodes.Num();
+	if (NodeCount < 2)
+	{
+		WireRender->UpdateSegments_GameThread(Segs);
+		return;
+	}
+
+	const int32 EffectiveSegments = FMath::Max(2, NumSegments);
+	const int32 PairCount = bClosedLoop ? NodeCount : (NodeCount - 1);
+	Segs.Reserve(PairCount * EffectiveSegments);
+
+	for (int32 PairIdx = 0; PairIdx < PairCount; ++PairIdx)
+	{
+		const int32 NextIdx = (PairIdx + 1) % NodeCount;
+		const FVector StartWS = GetWirePointWS(Nodes[PairIdx]);
+		const FVector EndWS = GetWirePointWS(Nodes[NextIdx]);
+
+		auto PointAt = [&](float T) {
+			const FVector P = FMath::Lerp(StartWS, EndWS, T);
+			const float SagFactor = FMath::Clamp(4.f * T * (1.f - T), 0.f, 1.f);
+			return P - FVector(0, 0, SagAmount * SagFactor);
+			};
+
+		const int32 SampleCount = FMath::Clamp(EffectiveSegments * 8, 32, 512);
+		TArray<FVector> Samples;
+		Samples.Reserve(SampleCount + 1);
+
+		TArray<float> CumLen;
+		CumLen.Reserve(SampleCount + 1);
+
+		float TotalLen = 0.f;
+		FVector Prev = PointAt(0.f);
+		Samples.Add(Prev);
+		CumLen.Add(0.f);
+
+		for (int32 i = 1; i <= SampleCount; ++i)
+		{
+			const float T = (float)i / (float)SampleCount;
+			const FVector Cur = PointAt(T);
+			TotalLen += FVector::Dist(Prev, Cur);
+			Samples.Add(Cur);
+			CumLen.Add(TotalLen);
+			Prev = Cur;
+		}
+
+		if (TotalLen <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+
+		auto EvalAtDistance = [&](float TargetLen) {
+			const float ClampedTarget = FMath::Clamp(TargetLen, 0.f, TotalLen);
+			for (int32 Idx = 1; Idx < CumLen.Num(); ++Idx)
+			{
+				if (CumLen[Idx] < ClampedTarget)
+				{
+					continue;
+				}
+
+				const float L0 = CumLen[Idx - 1];
+				const float L1 = CumLen[Idx];
+				const float A = (L1 > L0) ? ((ClampedTarget - L0) / (L1 - L0)) : 0.f;
+				return FMath::Lerp(Samples[Idx - 1], Samples[Idx], A);
+			}
+
+			return Samples.Last();
+			};
+
+		for (int32 i = 0; i < EffectiveSegments; ++i)
+		{
+			const float L0 = (TotalLen * (float)i) / (float)EffectiveSegments;
+			const float L1 = (TotalLen * (float)(i + 1)) / (float)EffectiveSegments;
+
+			FPowerLineSegment S;
+			S.Start = EvalAtDistance(L0);
+			S.End = EvalAtDistance(L1);
+			S.Color = LineColor;
+			S.Thickness = LineThickness;
+			S.DepthBias = 0.f;
+			S.bScreenSpace = true;
+			Segs.Add(S);
+		}
+	}
+
+	WireRender->UpdateSegments_GameThread(Segs);
 }

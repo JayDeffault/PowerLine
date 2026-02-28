@@ -6,6 +6,10 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/ArrowComponent.h"
+#include "Components/BillboardComponent.h"
+#include "Components/SphereComponent.h"
+#include "Components/BoxComponent.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Tickable.h"
 #include "PowerLineSystem.generated.h"
@@ -101,6 +105,13 @@ struct FPowerLineHangingSettings
 	int32 Seed = 24601;
 };
 
+UENUM(BlueprintType)
+enum class EPowerLineDistrictAreaShape : uint8
+{
+	Sphere UMETA(DisplayName = "Sphere"),
+	Box UMETA(DisplayName = "Box"),
+};
+
 UCLASS(BlueprintType)
 class PROGRAMM_API APowerLineDistrictDataManager : public AActor
 {
@@ -112,6 +123,19 @@ public:
 	// Optional district id, used for auto-find from components.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine")
 	FName DistrictId = NAME_None;
+
+	// If enabled, this manager affects only wires/components inside the selected area.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Area")
+	bool bUseArea = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Area", meta = (EditCondition = "bUseArea"))
+	EPowerLineDistrictAreaShape AreaShape = EPowerLineDistrictAreaShape::Sphere;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Area", meta = (EditCondition = "bUseArea", ClampMin = "1"))
+	float SphereRadiusCm = 5000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Area", meta = (EditCondition = "bUseArea", ClampMin = "1"))
+	FVector BoxExtentCm = FVector(5000.f, 5000.f, 3000.f);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine")
 	FPowerLineSagSettings Sag;
@@ -147,12 +171,56 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "PowerLine")
 	void MarkAllDistrictWiresDirty();
 
+	UFUNCTION(BlueprintCallable, Category = "PowerLine|Area")
+	bool AffectsWorldLocation(const FVector& LocationWS) const;
+
 protected:
 	static uint32 HashLine(const FVector& A, const FVector& B, int32 LineId);
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
+
+private:
+	UPROPERTY(VisibleAnywhere, Category = "PowerLine|Area")
+	TObjectPtr<USceneComponent> SceneRoot = nullptr;
+
+	UPROPERTY(VisibleAnywhere, Category = "PowerLine|Area")
+	TObjectPtr<UBillboardComponent> EditorBillboard = nullptr;
+
+	UPROPERTY(VisibleAnywhere, Category = "PowerLine|Area")
+	TObjectPtr<USphereComponent> AreaSphereComponent = nullptr;
+
+	UPROPERTY(VisibleAnywhere, Category = "PowerLine|Area")
+	TObjectPtr<UBoxComponent> AreaBoxComponent = nullptr;
+
+	void RefreshAreaVisualization();
+};
+
+UCLASS(BlueprintType)
+class PROGRAMM_API APowerLine_Pole : public AActor
+{
+	GENERATED_BODY()
+
+public:
+	APowerLine_Pole();
+
+	// Shared target actor for all power line components on this actor.
+	// Individual cable TargetActor has priority when explicitly set.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Default Target")
+	TObjectPtr<AActor> DefaultTargetActor = nullptr;
+
+	UFUNCTION(BlueprintCallable, Category = "PowerLine|Default Target")
+	void MarkChildWiresDirty();
+
+protected:
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+private:
+	UPROPERTY(VisibleAnywhere, Category = "PowerLine")
+	TObjectPtr<UArrowComponent> EditorArrow = nullptr;
 };
 
 // ============================
@@ -179,6 +247,18 @@ struct FPowerLineChunkKey
 };
 
 class UPowerLineSubsystem;
+class APowerLine_Pole;
+class UArrowComponent;
+
+USTRUCT(BlueprintType)
+struct FPowerLinePoleNode
+{
+	GENERATED_BODY()
+
+	// Pole position in local space of owner actor.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine")
+	FVector LocalPosition = FVector::ZeroVector;
+};
 
 // ============================
 // Render Component (one per chunk)
@@ -289,6 +369,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "PowerLine|Shape", meta = (ClampMin = "2"))
 	int32 NumSegments = 8;
 
+	// If true, segment count is driven by DistrictManager Segments settings (Auto Segments).
+	// If false, this component NumSegments is used.
+	UPROPERTY(EditAnywhere, Category = "PowerLine|Shape")
+	bool bUseDistrictSegments = true;
+
 	UPROPERTY(EditAnywhere, Category = "PowerLine|Render", meta = (ClampMin = "0.1"))
 	float LineThickness = 2.f;
 
@@ -302,6 +387,13 @@ public:
 	// Returns effective key for this attach point
 	UFUNCTION(BlueprintCallable, Category = "PowerLine|Attach")
 	FName GetAttachKey() const;
+
+	// Resolve target actor with fallback to owner APowerLine_Pole default target.
+	AActor* ResolveEffectiveTargetActor() const;
+
+	// Force target rebind and mark wire dirty.
+	UFUNCTION(BlueprintCallable, Category = "PowerLine")
+	void RefreshTargetBinding();
 
 	// Internal use
 	void BuildSegments(TArray<FPowerLineSegment>& Out) const;
@@ -318,6 +410,7 @@ private:
 
 	// Target transform changes (so wires update when the other pole/building moves)
 	FDelegateHandle TargetTransformChangedHandle;
+	TWeakObjectPtr<AActor> BoundTargetActor;
 	void BindToTarget();
 	void UnbindFromTarget();
 	void HandleTargetTransformChanged(USceneComponent* InComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
@@ -404,6 +497,74 @@ protected:
 	int32 InstanceIndex = INDEX_NONE;
 
 	friend class UPowerLineSubsystem;
+};
+
+// ============================
+// Multi pole component
+// One component can place many poles and auto-build wires between neighbor poles.
+// ============================
+
+UCLASS(ClassGroup = (Power), meta = (BlueprintSpawnableComponent))
+class PROGRAMM_API UPowerLineMultiPoleComponent : public USceneComponent
+{
+	GENERATED_BODY()
+
+public:
+	UPowerLineMultiPoleComponent();
+
+	// Mesh for all poles in this group.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Pole")
+	TObjectPtr<UStaticMesh> PoleMesh = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Pole")
+	FVector PoleScale = FVector(1.f, 1.f, 1.f);
+
+	// Pole points in local space. Wires are built between neighboring points.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Layout")
+	TArray<FPowerLinePoleNode> Nodes;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Layout")
+	bool bClosedLoop = false;
+
+	// Height above node position where wire is attached.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Wire")
+	float WireAttachHeightCm = 850.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Wire")
+	float SagAmount = 50.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Wire", meta = (ClampMin = "2"))
+	int32 NumSegments = 12;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Wire", meta = (ClampMin = "0.1"))
+	float LineThickness = 2.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PowerLine|Wire")
+	FColor LineColor = FColor::Black;
+
+	UFUNCTION(BlueprintCallable, Category = "PowerLine")
+	void RebuildNow();
+
+protected:
+	virtual void OnRegister() override;
+	virtual void OnUnregister() override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+private:
+	UPROPERTY(Transient)
+	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> PoleHISM = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UPowerLineRenderComponent> WireRender = nullptr;
+
+	FDelegateHandle TransformChangedHandle;
+	void HandleTransformChanged(USceneComponent* InComponent, EUpdateTransformFlags UpdateTransformFlags, ETeleportType Teleport);
+
+	void EnsureRuntimeComponents();
+	FVector GetWirePointWS(const FPowerLinePoleNode& Node) const;
 };
 
 // ============================
